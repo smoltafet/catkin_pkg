@@ -163,7 +163,10 @@ class GitClient(VcsClientBase):
 
         tags = []
         for tag_name in tag_names:
-            cmd = [self._executable, 'log', tag_name, '-n', '1', '--format=format:%ai']
+            # use the fully qualified refname to avoid ambiguities when a
+            # branch with the same name exists (git would print a warning
+            # about the ambiguous refname which would corrupt the output)
+            cmd = [self._executable, 'log', 'refs/tags/' + tag_name, '-n', '1', '--format=format:%ai']
             result = self._run_command(cmd)
             if result['returncode']:
                 raise RuntimeError('Could not fetch timestamp:\n%s' % result['output'])
@@ -181,9 +184,11 @@ class GitClient(VcsClientBase):
 
     def get_log_entries(self, from_tag, to_tag, skip_merges=False, only_merges=False):
         # query all hashes in the range
+        # the tag names are fully qualified to avoid ambiguities when a
+        # branch with the same name exists (see get_tags)
         cmd = [self._executable, 'log']
         if from_tag or to_tag:
-            cmd.append('%s%s' % ('%s..' % to_tag if to_tag else '', from_tag if from_tag else ''))
+            cmd.append('%s%s' % ('refs/tags/%s..' % to_tag if to_tag else '', 'refs/tags/' + from_tag if from_tag else ''))
         cmd.append('--format=format:%H')
         if skip_merges and only_merges:
             raise RuntimeError('Both "skip_merges" and "only_merges" are set to True, which contradicts.')
