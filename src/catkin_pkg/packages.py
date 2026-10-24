@@ -36,6 +36,7 @@ import multiprocessing
 import os
 
 from .package import _get_package_xml
+from .package import InvalidPackage
 from .package import PACKAGE_MANIFEST_FILENAME
 from .package import parse_package_string
 
@@ -76,7 +77,7 @@ def find_package_paths(basepath, exclude_paths=None, exclude_subspaces=False, ig
     return paths
 
 
-def find_packages(basepath, exclude_paths=None, exclude_subspaces=False, warnings=None, ignore_markers=DEFAULT_IGNORE_MARKERS):
+def find_packages(basepath, exclude_paths=None, exclude_subspaces=False, warnings=None, ignore_markers=DEFAULT_IGNORE_MARKERS, errors=None):
     """
     Crawls the filesystem to find package manifest files and parses them.
 
@@ -86,12 +87,14 @@ def find_packages(basepath, exclude_paths=None, exclude_subspaces=False, warning
         searched, ``bool``
     :param warnings: Print warnings if None or return them in the given list, ``bool``
     :param ignore_markers: Names of files that indicate that a folder should be ignored, ``set``
+    :param errors: Raise on invalid packages if None (the default) or append the errors to the
+        given list and skip the invalid packages, ``list``
     :returns: A dict mapping relative paths to ``Package`` objects ``dict``
     :raises: :exc:RuntimeError` If multiple packages have the same name
     """
     packages = find_packages_allowing_duplicates(basepath, exclude_paths=exclude_paths,
                                                  exclude_subspaces=exclude_subspaces, warnings=warnings,
-                                                 ignore_markers=ignore_markers)
+                                                 ignore_markers=ignore_markers, errors=errors)
     package_paths_by_name = {}
     for path, package in packages.items():
         if package.name not in package_paths_by_name:
@@ -106,17 +109,25 @@ def find_packages(basepath, exclude_paths=None, exclude_subspaces=False, warning
 
 class _PackageParser(object):
 
-    def __init__(self, capture_warnings):
+    def __init__(self, capture_warnings, capture_errors=False):
         self.capture_warnings = capture_warnings
+        self.capture_errors = capture_errors
 
     def __call__(self, xml_and_path_and_filename):
         xml, path, filename = xml_and_path_and_filename
         warnings = [] if self.capture_warnings else None
-        parsed_package = parse_package_string(xml, filename=filename, warnings=warnings)
-        return (path, parsed_package), warnings
+        error = None
+        parsed_package = None
+        try:
+            parsed_package = parse_package_string(xml, filename=filename, warnings=warnings)
+        except InvalidPackage as e:
+            if not self.capture_errors:
+                raise
+            error = str(e)
+        return (path, parsed_package), warnings, error
 
 
-def find_packages_allowing_duplicates(basepath, exclude_paths=None, exclude_subspaces=False, warnings=None, ignore_markers=DEFAULT_IGNORE_MARKERS):
+def find_packages_allowing_duplicates(basepath, exclude_paths=None, exclude_subspaces=False, warnings=None, ignore_markers=DEFAULT_IGNORE_MARKERS, errors=None):
     """
     Crawls the filesystem to find package manifest files and parses them.
 
@@ -126,6 +137,8 @@ def find_packages_allowing_duplicates(basepath, exclude_paths=None, exclude_subs
         searched, ``bool``
     :param warnings: Print warnings if None or return them in the given list
     :param ignore_markers: Names of files that indicate that a folder should be ignored, ``set``
+    :param errors: Raise on invalid packages if None (the default) or append the errors to the
+        given list and skip the invalid packages, ``list``
     :returns: A dict mapping relative paths to ``Package`` objects ``dict``
     """
     package_paths = find_package_paths(basepath, exclude_paths=exclude_paths, exclude_subspaces=exclude_subspaces, ignore_markers=ignore_markers)
@@ -152,21 +165,30 @@ def find_packages_allowing_duplicates(basepath, exclude_paths=None, exclude_subs
         #  use sequential loop
         parsed_packages = {}
         for xml, path, filename in data:
-            parsed_package = parse_package_string(
-                xml, filename=filename, warnings=warnings)
+            try:
+                parsed_package = parse_package_string(
+                    xml, filename=filename, warnings=warnings)
+            except InvalidPackage as e:
+                if errors is None:
+                    raise
+                errors.append(str(e))
+                continue
             parsed_packages[path] = parsed_package
         return parsed_packages
 
     # use multiprocessing pool
-    parser = _PackageParser(warnings is not None)
+    parser = _PackageParser(warnings is not None, capture_errors=errors is not None)
     try:
-        path_parsed_packages, warnings_lists = zip(*pool.map(parser, data))
+        path_parsed_packages, warnings_lists, error_list = zip(*pool.map(parser, data))
     finally:
         pool.close()
         pool.join()
     if parser.capture_warnings:
-        map(warnings.extend, warnings_lists)
-    return dict(path_parsed_packages)
+        for warnings_list in warnings_lists:
+            warnings.extend(warnings_list)
+    if parser.capture_errors:
+        errors.extend([error for error in error_list if error is not None])
+    return dict([(path, package) for path, package in path_parsed_packages if package is not None])
 
 
 def verify_equal_package_versions(packages):
